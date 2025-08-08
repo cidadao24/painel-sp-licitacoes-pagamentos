@@ -12,6 +12,13 @@ import os
 import pathlib
 from collections import defaultdict
 
+# Ajustar sys.path para permitir import do módulo utils quando executado como script
+import sys
+current_dir = pathlib.Path(__file__).resolve()
+repo_root = current_dir.parents[1]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 from scripts.utils import parse_money, norm_text
 
 

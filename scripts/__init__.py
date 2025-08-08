@@ -1,0 +1,1 @@
+"""Pacote scripts para coleta e processamento de dados."""
