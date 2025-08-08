@@ -31,12 +31,22 @@ def load_parametros() -> Dict:
     return {}
 
 def is_orgao_sp(nome: str, filtros: List[str]) -> bool:
-    """Verifica se o nome do órgão contém algum dos filtros."""
+    """Retorna True se o nome do órgão corresponder a algum filtro.
+
+    A comparação é feita de forma robusta:
+    - remove acentos e normaliza espaços via ``norm_text``;
+    - converte tudo para maiúsculas;
+    - verifica se qualquer filtro (também normalizado) está contido no nome.
+
+    Isso permite que filtros como "PREFEITURA" ou "SAO PAULO" casem com
+    "Prefeitura do Município de São Paulo" ou "PREFEITURA MUNICÍPIO SAO PAULO",
+    mesmo com acentos diferentes.
+    """
     if not nome:
         return False
-    up = nome.upper()
+    up = norm_text(nome).upper()
     for f in filtros:
-        if f in up:
+        if norm_text(f).upper() in up:
             return True
     return False
 
