@@ -7,11 +7,6 @@
   "crescimento_abrupto_fornecedor": { "limiar_percent": 300.0, "janela_meses": 6 },
   "pagamento_antes_contrato": { "janela_dias": 30, "similaridade_textual_min": 0.6 },
   "orgaos_nome_filtro": [
-    // Filtros para identificar órgãos do Município de São Paulo no PNCP.
-    // Usamos palavras-chave genéricas e o script normaliza acentos e espaços.
-    // Isso aumenta a chance de corresponder aos diversos nomes oficiais das
-    // secretarias e da prefeitura, como "Prefeitura do Município de São Paulo",
-    // "Secretaria Municipal de Saúde", etc.
     "SAO PAULO",
     "PREFEITURA",
     "SECRETARIA MUNICIPAL"
