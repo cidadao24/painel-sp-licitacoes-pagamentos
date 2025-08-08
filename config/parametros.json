@@ -1,5 +1,5 @@
 {
-  "janela_pncp_dias": 365,
+  "janela_pncp_dias": 90,
   "janela_pagamentos_meses": 24,
   "limpeza_raw_reter_dias": 90,
   "serie_valores_proximos": { "janela_dias": 7, "dif_percent_max": 1.0, "min_ocorrencias": 3 },
