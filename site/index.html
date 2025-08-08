@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Painel — Licitações/Contratos (Município de São Paulo)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Painel — Licitações/Contratos (Município de São Paulo)</h1>
+    <p>Dados coletados diariamente a partir do PNCP e, futuramente, da PMSP.</p>
+  </header>
+  <main>
+    <section>
+      <h2>Top fornecedores por valor contratado (PNCP)</h2>
+      <div id="chart_top" class="chart"></div>
+    </section>
+    <section>
+      <h2>Contratos recentes</h2>
+      <div id="lista" class="lista"></div>
+    </section>
+  </main>
+  <footer>
+    <small>Fonte: PNCP (API pública). Este painel é experimental e pode conter inconsistências; verifique nos portais oficiais.</small>
+  </footer>
+  <script src="./app.js"></script>
+</body>
+</html>

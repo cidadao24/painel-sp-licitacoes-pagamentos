@@ -1,0 +1,13 @@
+{
+  "janela_pncp_dias": 365,
+  "janela_pagamentos_meses": 24,
+  "limpeza_raw_reter_dias": 90,
+  "serie_valores_proximos": { "janela_dias": 7, "dif_percent_max": 1.0, "min_ocorrencias": 3 },
+  "concentracao_topN": 5,
+  "crescimento_abrupto_fornecedor": { "limiar_percent": 300.0, "janela_meses": 6 },
+  "pagamento_antes_contrato": { "janela_dias": 30, "similaridade_textual_min": 0.6 },
+  "orgaos_nome_filtro": [
+    "PREFEITURA DO MUNICIPIO DE SAO PAULO",
+    "SECRETARIA MUNICIPAL"
+  ]
+}
