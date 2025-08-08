@@ -20,6 +20,25 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from scripts.utils import parse_money, norm_text
+from typing import List, Dict
+
+def load_parametros() -> Dict:
+    """Carrega parâmetros do arquivo config/parametros.json."""
+    cfg_path = pathlib.Path("config/parametros.json")
+    if cfg_path.exists():
+        with cfg_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def is_orgao_sp(nome: str, filtros: List[str]) -> bool:
+    """Verifica se o nome do órgão contém algum dos filtros."""
+    if not nome:
+        return False
+    up = nome.upper()
+    for f in filtros:
+        if f in up:
+            return True
+    return False
 
 
 def load_json(path: str) -> list:
@@ -36,11 +55,31 @@ def main():
     contratacoes = load_json("data/raw/pncp/contratacoes.json")
     contratos = load_json("data/raw/pncp/contratos.json")
 
-    fatos_contratos = []
-    fornecedores_agg = defaultdict(lambda: {"cnpj": "", "nome": "", "total_contratado": 0.0, "total_pago": 0.0})
+    # Carregar status de coleta para detectar falhas no fetch
+    status_path = pathlib.Path("data/raw/pncp/status_fetch_success.json")
+    fetch_failed = False
+    if status_path.exists():
+        try:
+            with status_path.open("r", encoding="utf-8") as f:
+                status_data = json.load(f)
+                fetch_failed = not bool(status_data.get("success", True))
+        except Exception:
+            fetch_failed = True
+    # Carregar filtros de órgão a partir dos parâmetros
+    parametros = load_parametros()
+    filtros = [f.upper() for f in parametros.get("orgaos_nome_filtro", [])]
+
+    fatos_contratos: list = []
+    fornecedores_agg: Dict[str, Dict] = defaultdict(lambda: {"cnpj": "", "nome": "", "total_contratado": 0.0, "total_pago": 0.0})
 
     for c in contratos:
+        # Se a coleta falhou, não processamos os contratos
+        if fetch_failed:
+            continue
         orgao = ((c.get("orgaoEntidade") or {}).get("nomeOrgao")) or ""
+        # Se houver filtros definidos, filtrar pelos nomes dos órgãos
+        if filtros and not is_orgao_sp(orgao, filtros):
+            continue
         fornecedor = ((c.get("fornecedor") or {}).get("razaoSocial")) or ""
         cnpj = ((c.get("fornecedor") or {}).get("cpfCnpj")) or ""
         objeto = c.get("objeto") or ""
@@ -73,13 +112,17 @@ def main():
         # Nenhum pagamento real carregado ainda
         fatos_pagamentos = []
 
-    fornecedores = list(fornecedores_agg.values())
-    # Flags simples: top N fornecedores por valor contratado
-    topN = sorted(fornecedores, key=lambda x: x["total_contratado"], reverse=True)[:5]
-    flags = {
-        "top_fornecedores_contratados": topN,
-        "msg": "Alertas completos só serão gerados após integração dos pagamentos PMSP."
-    }
+    # Agregar lista de fornecedores somente se a coleta não falhou
+    fornecedores = list(fornecedores_agg.values()) if not fetch_failed else []
+    # Construir flags
+    if fetch_failed:
+        flags = {"fetch_failed": True}
+    else:
+        topN = sorted(fornecedores, key=lambda x: x["total_contratado"], reverse=True)[:5]
+        flags = {
+            "top_fornecedores_contratados": topN,
+            "msg": "Alertas completos só serão gerados após integração dos pagamentos PMSP."
+        }
 
     # Salvar
     with open(data_processed_dir / "fatos_contratos.json", "w", encoding="utf-8") as f:

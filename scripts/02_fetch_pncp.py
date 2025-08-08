@@ -17,6 +17,12 @@ import requests
 
 BASE_URL = "https://pncp.gov.br/api/consulta"
 
+# Cabeçalhos HTTP para as requisições. Um User-Agent ajuda a evitar bloqueios simples
+# e permite identificar o painel nos logs do PNCP.
+HEADERS = {
+    "User-Agent": "cidadao24-painel-sp-licitacoes-pagamentos/1.0 (+https://github.com/cidadao24/painel-sp-licitacoes-pagamentos)"
+}
+
 
 def load_parametros() -> dict:
     cfg_path = pathlib.Path("config/parametros.json")
@@ -24,24 +30,45 @@ def load_parametros() -> dict:
         return json.load(f)
 
 
-def fetch_paginated(endpoint: str, params: dict) -> list:
-    """Faz paginação em um endpoint da API do PNCP.
+def fetch_paginated(endpoint: str, params: dict) -> tuple[list, bool]:
+    """Faz paginação em um endpoint da API do PNCP com tentativas e backoff.
 
     Args:
         endpoint: parte do caminho após BASE_URL
         params: dicionário de parâmetros base (dataInicial, dataFinal etc.)
 
     Returns:
-        Lista de resultados agregados de todas as páginas.
+        tuple: (lista de resultados, booleano indicando se a coleta foi bem-sucedida).
+        Se ocorrerem erros repetidos ao chamar a API, a lista pode estar incompleta e
+        o segundo elemento retornará False.
     """
-    resultados = []
+    resultados: list = []
     pagina = 1
+    sucesso = True
+    # Fazemos as tentativas página a página. Se uma página falhar após várias tentativas,
+    # abortamos a coleta e marcamos como falha.
     while True:
-        params['pagina'] = pagina
-        params['tamanhoPagina'] = 500
+        params["pagina"] = pagina
+        params["tamanhoPagina"] = 500
         url = f"{BASE_URL}{endpoint}"
-        resp = requests.get(url, params=params, timeout=60)
-        resp.raise_for_status()
+        tentativa = 0
+        while True:
+            try:
+                resp = requests.get(url, params=params, headers=HEADERS, timeout=60)
+                # Considere erros 5xx como temporários que merecem nova tentativa
+                if resp.status_code >= 500:
+                    raise requests.HTTPError(f"Erro {resp.status_code} do servidor")
+                resp.raise_for_status()
+                break
+            except Exception:
+                tentativa += 1
+                if tentativa >= 3:
+                    # aborta coleta e retorna o que já foi obtido, sinalizando falha
+                    sucesso = False
+                    return resultados, sucesso
+                # espera incremental (2s, 4s, 6s)
+                import time as _time
+                _time.sleep(2 * tentativa)
         data = resp.json()
         itens = data.get("data", [])
         if not itens:
@@ -51,7 +78,7 @@ def fetch_paginated(endpoint: str, params: dict) -> list:
         if pagina >= total_paginas:
             break
         pagina += 1
-    return resultados
+    return resultados, sucesso
 
 
 def is_orgao_sp(nome: str, filtros: list) -> bool:
@@ -74,22 +101,24 @@ def main():
     }
 
     # Contratos
-    contratos = fetch_paginated("/v1/contratos", params_base.copy())
+    contratos, sucesso = fetch_paginated("/v1/contratos", params_base.copy())
 
-    # Filtrar por órgão
-    contratos_sp = [c for c in contratos
-                    if is_orgao_sp(((c.get("orgaoEntidade") or {}).get("nomeOrgao")), filtros)]
+    # Atenção: não filtramos por órgão aqui; a filtragem será feita na transformação.
 
     # Salvar
     outdir = pathlib.Path("data/raw/pncp")
     outdir.mkdir(parents=True, exist_ok=True)
-    # Salvamos apenas a lista de contratos neste momento
+    # Salvamos a lista completa de contratos coletados
     with (outdir / "contratos.json").open("w", encoding="utf-8") as f:
-        json.dump(contratos_sp, f, ensure_ascii=False)
+        json.dump(contratos, f, ensure_ascii=False)
     # Para compatibilidade, salvamos um arquivo vazio de contratacoes
     with (outdir / "contratacoes.json").open("w", encoding="utf-8") as f:
         json.dump([], f)
-    print(f"[02] PNCP: contratos={len(contratos_sp)}")
+    # Salvar status da coleta
+    status_path = outdir / "status_fetch_success.json"
+    with status_path.open("w", encoding="utf-8") as f:
+        json.dump({"success": bool(sucesso)}, f)
+    print(f"[02] PNCP: contratos={len(contratos)}, sucesso={sucesso}")
 
 
 if __name__ == "__main__":
