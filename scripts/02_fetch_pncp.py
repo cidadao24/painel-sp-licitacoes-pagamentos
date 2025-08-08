@@ -73,24 +73,23 @@ def main():
         "dataFinal": data_fim.strftime("%Y%m%d")
     }
 
-    # Contratacoes
-    contratacoes = fetch_paginated("/v1/contratacoes", params_base.copy())
     # Contratos
     contratos = fetch_paginated("/v1/contratos", params_base.copy())
 
     # Filtrar por órgão
-    contratacoes_sp = [c for c in contratacoes
-                       if is_orgao_sp(((c.get("orgaoEntidade") or {}).get("nomeOrgao")), filtros)]
     contratos_sp = [c for c in contratos
                     if is_orgao_sp(((c.get("orgaoEntidade") or {}).get("nomeOrgao")), filtros)]
 
+    # Salvar
     outdir = pathlib.Path("data/raw/pncp")
     outdir.mkdir(parents=True, exist_ok=True)
-    with (outdir / "contratacoes.json").open("w", encoding="utf-8") as f:
-        json.dump(contratacoes_sp, f, ensure_ascii=False)
+    # Salvamos apenas a lista de contratos neste momento
     with (outdir / "contratos.json").open("w", encoding="utf-8") as f:
         json.dump(contratos_sp, f, ensure_ascii=False)
-    print(f"[02] PNCP: contratacoes={len(contratacoes_sp)} contratos={len(contratos_sp)}")
+    # Para compatibilidade, salvamos um arquivo vazio de contratacoes
+    with (outdir / "contratacoes.json").open("w", encoding="utf-8") as f:
+        json.dump([], f)
+    print(f"[02] PNCP: contratos={len(contratos_sp)}")
 
 
 if __name__ == "__main__":
