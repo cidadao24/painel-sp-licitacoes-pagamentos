@@ -1,0 +1,2 @@
+# Ignore raw data to prevent large file push
+data/raw/
