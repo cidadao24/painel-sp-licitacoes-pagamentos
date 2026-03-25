@@ -1,0 +1,38 @@
+name: Bureaucracy Radar
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bureaucracy-radar
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Initialize DB
+        run: python -m src.bureaucracy_radar.cli init-db
+
+      - name: Run watcher
+        run: python -m src.bureaucracy_radar.cli run --config config/sources.example.yml > data/latest-run.json
+
+      - name: Upload latest run artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bureaucracy-radar-latest-run
+          path: bureaucracy-radar/data/latest-run.json
