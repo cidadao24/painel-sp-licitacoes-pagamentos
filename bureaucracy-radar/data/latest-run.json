@@ -1,0 +1,12 @@
+[
+  {
+    "source_id": "diario_oficial_sp_home",
+    "status": "initial_snapshot",
+    "summary": "Primeiro snapshot registrado."
+  },
+  {
+    "source_id": "metro_sp_noticias",
+    "status": "initial_snapshot",
+    "summary": "Primeiro snapshot registrado."
+  }
+]
