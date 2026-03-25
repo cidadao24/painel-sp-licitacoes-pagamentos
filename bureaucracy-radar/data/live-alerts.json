@@ -1,0 +1,9 @@
+[
+  {
+    "created_at": "2026-03-25T22:10:00Z",
+    "category": "system",
+    "title": "Live publishing pipeline initialized",
+    "summary": "This file will be overwritten by the scheduled workflow once live runs are committed automatically.",
+    "evidence": "Initial seeded live output."
+  }
+]
