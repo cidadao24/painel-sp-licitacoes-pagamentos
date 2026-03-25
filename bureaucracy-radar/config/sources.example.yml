@@ -1,0 +1,14 @@
+sources:
+  - id: diario_oficial_sp_home
+    name: Diário Oficial da Cidade de São Paulo — página inicial
+    url: https://diariooficial.prefeitura.sp.gov.br/
+    type: html
+    category: diario_oficial
+    interval_minutes: 360
+
+  - id: metro_sp_noticias
+    name: Metrô de São Paulo — notícias
+    url: https://www.metro.sp.gov.br/pt_BR/imprensa/noticias/
+    type: html
+    category: transporte
+    interval_minutes: 360
