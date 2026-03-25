@@ -1,0 +1,18 @@
+[
+  {
+    "created_at": "2026-03-25T21:40:00Z",
+    "category": "transporte",
+    "title": "Metrô de São Paulo — página de notícias alterada",
+    "summary": "A página monitorada apresentou mudança textual e deve ser revisada para verificar se houve alteração operacional relevante.",
+    "evidence": "Mudança detectada: 3 linhas de diferença líquida.\n--- previous\n+++ current\n@@ exemplo @@\n- texto antigo\n+ texto novo",
+    "source_url": "https://www.metro.sp.gov.br/pt_BR/imprensa/noticias/"
+  },
+  {
+    "created_at": "2026-03-25T21:42:00Z",
+    "category": "diario_oficial",
+    "title": "Diário Oficial da Cidade de São Paulo — alteração detectada",
+    "summary": "Novo snapshot registrado com mudança textual. Recomendado revisar se há nova norma, edital ou aviso de interesse.",
+    "evidence": "Mudança detectada: 1 linha de diferença líquida.\n--- previous\n+++ current\n@@ exemplo @@\n- edição sem aviso\n+ nova publicação disponível",
+    "source_url": "https://diariooficial.prefeitura.sp.gov.br/"
+  }
+]
