@@ -1,0 +1,50 @@
+name: Bureaucracy Radar Live Deploy
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '28 */6 * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy-live-results:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: bureaucracy-radar
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate live results
+        working-directory: bureaucracy-radar
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m bureaucracy_radar.cli init-db
+          python -m bureaucracy_radar.cli run --config config/sources.example.yml > data/latest-run.json
+          python -m bureaucracy_radar.render_live_alerts
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
