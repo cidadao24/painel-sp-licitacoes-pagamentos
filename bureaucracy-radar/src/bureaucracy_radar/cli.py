@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import sys
 
 import yaml
 
@@ -25,6 +26,14 @@ def cmd_init_db(args: argparse.Namespace) -> None:
     print(json.dumps({'status': 'ok', 'db_path': db_path}, ensure_ascii=False))
 
 
+def _fetch_error_summary(source_id: str, exc: Exception) -> dict:
+    return {
+        'source_id': source_id,
+        'status': 'fetch_error',
+        'summary': f'{type(exc).__name__}: {exc}',
+    }
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     db_path = os.getenv('BUREAUCRACY_RADAR_DB', './data/bureaucracy_radar.db')
     conn = connect(db_path)
@@ -35,9 +44,19 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     for source in sources:
         source_id = source['id']
-        result = fetch_url(source['url'])
-        latest = get_latest_snapshot(conn, source_id)
         fetched_at = datetime.now(timezone.utc).isoformat()
+
+        try:
+            result = fetch_url(source['url'])
+        except Exception as exc:  # Keep scheduled deploys alive when a public source blocks/limits bots.
+            print(
+                f'[bureaucracy-radar] fetch failed for {source_id}: {type(exc).__name__}: {exc}',
+                file=sys.stderr,
+            )
+            output.append(_fetch_error_summary(source_id, exc))
+            continue
+
+        latest = get_latest_snapshot(conn, source_id)
 
         save_raw_snapshot(Path('./data/raw'), source_id, result.raw_bytes)
 
