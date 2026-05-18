@@ -2,6 +2,11 @@ name: Bureaucracy Radar Live Deploy
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/bureaucracy-radar-live-deploy.yml'
+      - 'bureaucracy-radar/**'
   schedule:
     - cron: '28 */6 * * *'
 
