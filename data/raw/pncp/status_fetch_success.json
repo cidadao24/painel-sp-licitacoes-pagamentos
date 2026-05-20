@@ -1,1 +1,1 @@
-{"success": false}
+{"success": true, "partial": true, "failed_chunks": 13, "total_chunks": 13, "contracts_collected": 16500}
