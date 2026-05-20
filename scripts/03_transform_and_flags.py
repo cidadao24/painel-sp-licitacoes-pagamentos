@@ -12,7 +12,6 @@ import os
 import pathlib
 from collections import defaultdict
 
-# Ajustar sys.path para permitir import do módulo utils quando executado como script
 import sys
 current_dir = pathlib.Path(__file__).resolve()
 repo_root = current_dir.parents[1]
@@ -22,26 +21,16 @@ if str(repo_root) not in sys.path:
 from scripts.utils import parse_money, norm_text
 from typing import List, Dict
 
+
 def load_parametros() -> Dict:
-    """Carrega parâmetros do arquivo config/parametros.json."""
     cfg_path = pathlib.Path("config/parametros.json")
     if cfg_path.exists():
         with cfg_path.open("r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
+
 def is_orgao_sp(nome: str, filtros: List[str]) -> bool:
-    """Retorna True se o nome do órgão corresponder a algum filtro.
-
-    A comparação é feita de forma robusta:
-    - remove acentos e normaliza espaços via ``norm_text``;
-    - converte tudo para maiúsculas;
-    - verifica se qualquer filtro (também normalizado) está contido no nome.
-
-    Isso permite que filtros como "PREFEITURA" ou "SAO PAULO" casem com
-    "Prefeitura do Município de São Paulo" ou "PREFEITURA MUNICÍPIO SAO PAULO",
-    mesmo com acentos diferentes.
-    """
     if not nome:
         return False
     up = norm_text(nome).upper()
@@ -51,11 +40,22 @@ def is_orgao_sp(nome: str, filtros: List[str]) -> bool:
     return False
 
 
-def load_json(path: str) -> list:
+def load_json(path: str):
     if not os.path.exists(path):
         return []
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_fetch_status() -> dict:
+    status_path = pathlib.Path("data/raw/pncp/status_fetch_success.json")
+    if not status_path.exists():
+        return {"success": False, "partial": False, "missing_status_file": True}
+    try:
+        with status_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        return {"success": False, "partial": False, "status_read_error": f"{type(exc).__name__}: {exc}"}
 
 
 def main():
@@ -64,18 +64,10 @@ def main():
 
     contratacoes = load_json("data/raw/pncp/contratacoes.json")
     contratos = load_json("data/raw/pncp/contratos.json")
+    fetch_status = load_fetch_status()
+    fetch_failed = not bool(fetch_status.get("success", True))
+    fetch_partial = bool(fetch_status.get("partial", False))
 
-    # Carregar status de coleta para detectar falhas no fetch
-    status_path = pathlib.Path("data/raw/pncp/status_fetch_success.json")
-    fetch_failed = False
-    if status_path.exists():
-        try:
-            with status_path.open("r", encoding="utf-8") as f:
-                status_data = json.load(f)
-                fetch_failed = not bool(status_data.get("success", True))
-        except Exception:
-            fetch_failed = True
-    # Carregar filtros de órgão a partir dos parâmetros
     parametros = load_parametros()
     filtros = [f.upper() for f in parametros.get("orgaos_nome_filtro", [])]
 
@@ -83,11 +75,7 @@ def main():
     fornecedores_agg: Dict[str, Dict] = defaultdict(lambda: {"cnpj": "", "nome": "", "total_contratado": 0.0, "total_pago": 0.0})
 
     for c in contratos:
-        # Se a coleta falhou, não processamos os contratos
-        if fetch_failed:
-            continue
         orgao = ((c.get("orgaoEntidade") or {}).get("nomeOrgao")) or ""
-        # Se houver filtros definidos, filtrar pelos nomes dos órgãos
         if filtros and not is_orgao_sp(orgao, filtros):
             continue
         fornecedor = ((c.get("fornecedor") or {}).get("razaoSocial")) or ""
@@ -115,26 +103,28 @@ def main():
         f["nome"] = fornecedor
         f["total_contratado"] += valor_contratado
 
-    # Pagamentos (placeholder): carregar arquivo se existir
     fatos_pagamentos = []
     pag_path = "data/raw/sp/placeholder.json"
     if os.path.exists(pag_path):
-        # Nenhum pagamento real carregado ainda
         fatos_pagamentos = []
 
-    # Agregar lista de fornecedores somente se a coleta não falhou
-    fornecedores = list(fornecedores_agg.values()) if not fetch_failed else []
-    # Construir flags
-    if fetch_failed:
-        flags = {"fetch_failed": True}
-    else:
-        topN = sorted(fornecedores, key=lambda x: x["total_contratado"], reverse=True)[:5]
-        flags = {
-            "top_fornecedores_contratados": topN,
-            "msg": "Alertas completos só serão gerados após integração dos pagamentos PMSP."
-        }
+    fornecedores = list(fornecedores_agg.values())
+    topN = sorted(fornecedores, key=lambda x: x["total_contratado"], reverse=True)[:5]
 
-    # Salvar
+    flags = {
+        "top_fornecedores_contratados": topN,
+        "msg": "Alertas completos só serão gerados após integração dos pagamentos PMSP.",
+        "fetch_status": fetch_status,
+        "fetch_failed": bool(fetch_failed and not contratos),
+        "fetch_partial": bool(fetch_partial),
+        "raw_contracts_loaded": len(contratos),
+        "contracts_after_filter": len(fatos_contratos),
+    }
+    if fetch_failed and contratos:
+        flags["warning"] = "Coleta PNCP parcial: alguns blocos falharam, mas os dados obtidos foram preservados no painel."
+    elif fetch_failed:
+        flags["warning"] = "Coleta PNCP falhou sem dados aproveitáveis."
+
     with open(data_processed_dir / "fatos_contratos.json", "w", encoding="utf-8") as f:
         json.dump(fatos_contratos, f, ensure_ascii=False)
     with open(data_processed_dir / "fatos_pagamentos.json", "w", encoding="utf-8") as f:
@@ -143,7 +133,7 @@ def main():
         json.dump(fornecedores, f, ensure_ascii=False)
     with open(data_processed_dir / "flags.json", "w", encoding="utf-8") as f:
         json.dump(flags, f, ensure_ascii=False)
-    print(f"[03] Processamento concluído: contratos={len(fatos_contratos)} fornecedores={len(fornecedores)}")
+    print(f"[03] Processamento concluído: raw={len(contratos)} contratos={len(fatos_contratos)} fornecedores={len(fornecedores)}")
 
 
 if __name__ == "__main__":
