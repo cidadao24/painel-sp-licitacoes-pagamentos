@@ -1,6 +1,13 @@
 name: Data refresh (SP + PNCP)
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/data-refresh.yml'
+      - 'scripts/**'
+      - 'config/**'
+      - 'site/**'
   schedule:
     - cron: '5 9 * * *'  # Todos os dias às 06:05 BRT (09:05 UTC)
   workflow_dispatch:
