@@ -7,6 +7,11 @@ on:
     paths:
       - '.github/workflows/bureaucracy-radar-live-deploy.yml'
       - 'bureaucracy-radar/**'
+      - 'site/**'
+      - 'data/**'
+      - 'scripts/**'
+      - 'config/**'
+      - 'index.html'
   schedule:
     - cron: '28 */6 * * *'
 
