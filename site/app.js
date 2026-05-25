@@ -14,6 +14,19 @@ function formatNumber(value) {
   return Number(value || 0).toLocaleString('pt-BR');
 }
 
+function formatCnpj(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (digits.length !== 14) return value || 'não informado';
+  return digits.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+}
+
+function supplierAgeLine(c) {
+  const cnpj = formatCnpj(c.fornecedor_cnpj);
+  const idade = c.cnpj_idade_texto || 'idade do CNPJ indisponível';
+  const abertura = c.cnpj_data_abertura ? ` • abertura: ${c.cnpj_data_abertura}` : '';
+  return `CNPJ: ${cnpj} • idade: ${idade}${abertura}`;
+}
+
 function hasRealSupplierName(item) {
   const nome = String(item.nome || '').trim();
   const cnpj = String(item.cnpj || '').trim();
@@ -30,6 +43,9 @@ function renderStatus(flags) {
   let html = '';
   if (partial) {
     html += card(`<strong>Coleta PNCP parcial.</strong><br>Foram coletados ${formatNumber(raw)} contratos brutos. ${failedChunks ?? '?'} de ${totalChunks ?? '?'} blocos tiveram falha ou resposta parcial.`);
+  }
+  if (flags.cnpj_enriched_count !== undefined) {
+    html += card(`<strong>Enriquecimento de CNPJ.</strong><br>${formatNumber(flags.cnpj_enriched_count)} CNPJs tiveram data de abertura/idade identificada nesta rodada. Limite por execução: ${formatNumber(flags.cnpj_enrich_limit || 0)} consultas novas.`);
   }
   if (raw > 0 && filtered === 0) {
     html += card(`<strong>Dados coletados, mas nenhum contrato passou pelo filtro de São Paulo.</strong><br>O backend trouxe ${formatNumber(raw)} contratos brutos, mas o filtro municipal retornou 0.`);
@@ -99,6 +115,7 @@ async function init() {
     const valor = (c.valor_contratado || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     div.innerHTML = `<strong>${c.fornecedor_nome || '(fornecedor não informado)'} — R$ ${valor}</strong><br>
                       ${c.objeto || ''}<br>
+                      <small>${supplierAgeLine(c)}</small><br>
                       <small>${c.orgao || ''} • Publicado em: ${c.data_publicacao || ''}</small>`;
     listaEl.appendChild(div);
   });
