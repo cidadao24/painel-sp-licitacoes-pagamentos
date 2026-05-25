@@ -14,7 +14,13 @@ function formatNumber(value) {
   return Number(value || 0).toLocaleString('pt-BR');
 }
 
-function renderStatus(listaEl, flags) {
+function hasRealSupplierName(item) {
+  const nome = String(item.nome || '').trim();
+  const cnpj = String(item.cnpj || '').trim();
+  return Boolean(nome || cnpj) && nome !== '(fornecedor não informado)';
+}
+
+function renderStatus(flags) {
   const raw = flags.raw_contracts_loaded || flags.fetch_status?.contracts_collected || 0;
   const filtered = flags.contracts_after_filter || 0;
   const failedChunks = flags.fetch_status?.failed_chunks;
@@ -26,10 +32,13 @@ function renderStatus(listaEl, flags) {
     html += card(`<strong>Coleta PNCP parcial.</strong><br>Foram coletados ${formatNumber(raw)} contratos brutos. ${failedChunks ?? '?'} de ${totalChunks ?? '?'} blocos tiveram falha ou resposta parcial.`);
   }
   if (raw > 0 && filtered === 0) {
-    html += card(`<strong>Dados coletados, mas nenhum contrato passou pelo filtro de São Paulo.</strong><br>O problema atual não é falta total de coleta: o backend trouxe ${formatNumber(raw)} contratos brutos, mas o filtro municipal retornou 0. O filtro PNCP precisa ser ajustado aos campos reais retornados pela API.`);
+    html += card(`<strong>Dados coletados, mas nenhum contrato passou pelo filtro de São Paulo.</strong><br>O backend trouxe ${formatNumber(raw)} contratos brutos, mas o filtro municipal retornou 0.`);
   }
   if (flags.warning) {
     html += card(`<strong>Aviso técnico:</strong><br>${flags.warning}`);
+  }
+  if (flags.supplier_warning) {
+    html += card(`<strong>Aviso sobre fornecedores:</strong><br>${flags.supplier_warning}`);
   }
   return html;
 }
@@ -49,21 +58,25 @@ async function init() {
   }
 
   if (flags && flags.fetch_failed) {
-    listaEl.innerHTML = card("Erro ao coletar dados do PNCP. Tente novamente mais tarde.") + renderStatus(listaEl, flags);
+    listaEl.innerHTML = card("Erro ao coletar dados do PNCP. Tente novamente mais tarde.") + renderStatus(flags);
     if (chartEl) chartEl.innerHTML = card("Gráfico indisponível por falha de coleta.");
     return;
   }
 
   if (!contratos || contratos.length === 0) {
-    listaEl.innerHTML = renderStatus(listaEl, flags) || card("Sem publicações no período selecionado.");
+    listaEl.innerHTML = renderStatus(flags) || card("Sem publicações no período selecionado.");
     if (chartEl) chartEl.innerHTML = card("Sem dados suficientes para gerar o gráfico.");
     return;
   }
 
-  const top = (flags.top_fornecedores_contratados || []).map(item => ({
-    nome: item.nome || item.cnpj || "(desconhecido)",
-    valor: item.total_contratado || 0
-  }));
+  listaEl.innerHTML = renderStatus(flags);
+
+  const top = (flags.top_fornecedores_contratados || [])
+    .filter(hasRealSupplierName)
+    .map(item => ({
+      nome: item.nome || item.cnpj,
+      valor: item.total_contratado || 0
+    }));
 
   if (top.length > 0) {
     const trace = {
@@ -77,7 +90,7 @@ async function init() {
     };
     Plotly.newPlot('chart_top', [trace], layout, { displayModeBar: false });
   } else if (chartEl) {
-    chartEl.innerHTML = card("Sem fornecedores agregados para exibir.");
+    chartEl.innerHTML = card("Gráfico temporariamente oculto: os contratos carregados ainda não têm fornecedor/CNPJ identificável no arquivo processado atual.");
   }
 
   contratos.slice(0, 100).forEach(c => {
