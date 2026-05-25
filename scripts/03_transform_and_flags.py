@@ -1,9 +1,9 @@
 """
 Transforma dados brutos do PNCP e gera arquivos JSON processados para o painel.
 
-Este script carrega os dados brutos de `data/raw/pncp/contratacoes.json` e
-`data/raw/pncp/contratos.json`, cria listas de fatos e fornecedores, e
-gera um conjunto inicial de `flags` com alertas simples.
+Este script carrega os dados brutos de `data/raw/pncp/contratos.json`, filtra
+contratos do Município de São Paulo, extrai fornecedor/valor de forma tolerante
+a variações do schema do PNCP e gera JSONs consumidos pelo site.
 """
 
 import json
@@ -18,15 +18,50 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from scripts.utils import parse_money, norm_text
-from typing import Dict, List, Any
+from typing import Dict, Any
 
 
-def load_parametros() -> Dict:
-    cfg_path = pathlib.Path("config/parametros.json")
-    if cfg_path.exists():
-        with cfg_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+MUNICIPIO_SP_ORG_TOKENS = [
+    "MUNICIPIO DE SAO PAULO",
+    "MUNICIPIO SAO PAULO",
+    "PREFEITURA DO MUNICIPIO DE SAO PAULO",
+    "PREFEITURA MUNICIPAL DE SAO PAULO",
+    "PREFEITURA DE SAO PAULO",
+    "SECRETARIA MUNICIPAL",
+    "FUNDO MUNICIPAL DE SAUDE",
+    "FUNDO MUNICIPAL DE ASSISTENCIA SOCIAL",
+    "FUNDO MUNICIPAL DOS DIREITOS",
+    "CAMARA MUNICIPAL DE SAO PAULO",
+]
+
+EXCLUDED_ORG_TOKENS = [
+    "ESTADO DE SAO PAULO",
+    "SECRETARIA DE ESTADO",
+    "UNIVERSIDADE DE SAO PAULO",
+    "UNIVERSIDADE FEDERAL",
+    "INSTITUTO FEDERAL",
+    "COMANDO DA AERONAUTICA",
+    "MINISTERIO ",
+    "FUNDACAO PARA O DESENVOLVIMENTO DA EDUCACAO",
+    "CONSELHO REGIONAL",
+    "DEPARTAMENTO DE ESTRADAS DE RODAGEM",
+    "CENTRO ESTADUAL",
+]
+
+SUPPLIER_NAME_KEYS = [
+    "razaoSocial", "nomeRazaoSocialFornecedor", "nomeFornecedor", "fornecedorNome",
+    "fornecedor", "nome", "razaoSocialFornecedor", "nomeEmpresarial",
+]
+
+SUPPLIER_CNPJ_KEYS = [
+    "cpfCnpj", "niFornecedor", "cpfCnpjFornecedor", "fornecedorCnpj", "cnpjFornecedor",
+    "cnpj", "numeroDocumento", "identificadorFornecedor",
+]
+
+VALUE_KEYS = [
+    "valorFinal", "valorContrato", "valorGlobal", "valorTotal", "valorTotalContrato",
+    "valorInicial", "valorParcela", "valor", "valorContratado",
+]
 
 
 def load_json(path: str):
@@ -52,7 +87,6 @@ def as_dict(value: Any) -> dict:
 
 
 def deep_text(value: Any) -> str:
-    """Extrai texto de dict/list sem depender de nomes exatos de campos do PNCP."""
     if value is None:
         return ""
     if isinstance(value, (str, int, float, bool)):
@@ -64,13 +98,33 @@ def deep_text(value: Any) -> str:
     return ""
 
 
-def get_nested(data: dict, *path: str) -> str:
+def get_nested(data: dict, *path: str) -> Any:
     cur: Any = data
     for part in path:
         if not isinstance(cur, dict):
             return ""
         cur = cur.get(part)
-    return "" if cur is None else str(cur)
+    return cur
+
+
+def first_value_from_keys(*containers: dict, keys: list[str]) -> str:
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in keys:
+            value = container.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return ""
+
+
+def first_money_from_keys(c: dict, keys: list[str]) -> float:
+    for key in keys:
+        value = c.get(key)
+        parsed = parse_money(value)
+        if parsed:
+            return parsed
+    return 0.0
 
 
 def contract_org_text(c: dict) -> str:
@@ -78,11 +132,13 @@ def contract_org_text(c: dict) -> str:
     unidade = as_dict(c.get("unidadeOrgao"))
     compra = as_dict(c.get("compra"))
     parts = [
+        orgao.get("cnpj"),
         orgao.get("nomeOrgao"),
         orgao.get("razaoSocial"),
         orgao.get("nomeRazaoSocial"),
         orgao.get("poderId"),
         orgao.get("esferaId"),
+        unidade.get("codigoUnidade"),
         unidade.get("nomeUnidade"),
         unidade.get("nome"),
         unidade.get("municipioNome"),
@@ -91,8 +147,8 @@ def contract_org_text(c: dict) -> str:
         c.get("razaoSocialOrgao"),
         c.get("municipioNome"),
         c.get("ufSigla"),
-        compra.get("orgaoEntidade"),
-        compra.get("unidadeOrgao"),
+        deep_text(compra.get("orgaoEntidade")),
+        deep_text(compra.get("unidadeOrgao")),
     ]
     return " ".join(str(p) for p in parts if p)
 
@@ -111,36 +167,63 @@ def orgao_display_name(c: dict) -> str:
     )
 
 
+def normalized_org_text(c: dict) -> str:
+    return norm_text(contract_org_text(c))
+
+
 def is_municipio_sao_paulo_contract(c: dict) -> bool:
-    """Identifica registros ligados ao Município de São Paulo no PNCP.
-
-    O schema do PNCP varia entre endpoints/versões; por isso usamos sinais em
-    vários campos, e não apenas `orgaoEntidade.nomeOrgao`.
-    """
     unidade = as_dict(c.get("unidadeOrgao"))
-    orgao = as_dict(c.get("orgaoEntidade"))
-
     municipio = norm_text(
         unidade.get("municipioNome")
         or c.get("municipioNome")
         or get_nested(c, "compra", "unidadeOrgao", "municipioNome")
-    ).upper()
-    uf = (
+    )
+    uf = norm_text(
         unidade.get("ufSigla")
         or c.get("ufSigla")
         or get_nested(c, "compra", "unidadeOrgao", "ufSigla")
-        or ""
-    ).upper()
+    )
+    text = normalized_org_text(c)
 
-    text = norm_text(contract_org_text(c)).upper()
-    municipal_signal = any(token in text for token in ["PREFEITURA", "MUNICIP", "SECRETARIA MUNICIPAL", "SAO PAULO"])
+    if any(token in text for token in EXCLUDED_ORG_TOKENS):
+        return False
 
-    if municipio == "SAO PAULO" and (not uf or uf == "SP") and municipal_signal:
-        return True
+    has_municipal_sp_token = any(token in text for token in MUNICIPIO_SP_ORG_TOKENS)
 
-    # Fallback para registros em que município/UF não vêm estruturados.
-    # Evita depender de um único campo e cobre `razaoSocial`/`nomeUnidade`.
-    return ("SAO PAULO" in text) and any(token in text for token in ["PREFEITURA", "MUNICIP", "SECRETARIA MUNICIPAL"])
+    # Estruturado: município = São Paulo/SP + órgão municipal explícito.
+    if municipio == "SAO PAULO" and (not uf or uf == "SP"):
+        return has_municipal_sp_token or "MUNICIPAL" in text
+
+    # Não estruturado: exige token forte; não basta conter "São Paulo".
+    return has_municipal_sp_token
+
+
+def extract_supplier(c: dict) -> tuple[str, str]:
+    fornecedor_obj = as_dict(c.get("fornecedor"))
+    fornecedor_pessoa = as_dict(c.get("pessoa"))
+    name = first_value_from_keys(c, fornecedor_obj, fornecedor_pessoa, keys=SUPPLIER_NAME_KEYS)
+    cnpj = first_value_from_keys(c, fornecedor_obj, fornecedor_pessoa, keys=SUPPLIER_CNPJ_KEYS)
+
+    # Alguns retornos do PNCP usam campos paralelos com nomes diferentes.
+    if not name:
+        for key, value in c.items():
+            lk = key.lower()
+            if "fornecedor" in lk and any(word in lk for word in ["nome", "razao", "social"]):
+                if value not in (None, ""):
+                    name = str(value)
+                    break
+    if not cnpj:
+        for key, value in c.items():
+            lk = key.lower()
+            if ("fornecedor" in lk or "contratad" in lk) and any(word in lk for word in ["cnpj", "cpf", "ni"]):
+                if value not in (None, ""):
+                    cnpj = str(value)
+                    break
+    return name, cnpj
+
+
+def extract_object(c: dict) -> str:
+    return c.get("objeto") or c.get("objetoContrato") or c.get("descricaoObjeto") or c.get("objetoCompra") or ""
 
 
 def main():
@@ -153,8 +236,10 @@ def main():
     fetch_partial = bool(fetch_status.get("partial", False))
 
     fatos_contratos: list = []
-    fornecedores_agg: Dict[str, Dict] = defaultdict(lambda: {"cnpj": "", "nome": "", "total_contratado": 0.0, "total_pago": 0.0})
+    fornecedores_agg: Dict[str, Dict] = defaultdict(lambda: {"cnpj": "", "nome": "", "total_contratado": 0.0, "total_pago": 0.0, "qtd_contratos": 0})
     orgao_sample: list[str] = []
+    accepted_org_sample: list[str] = []
+    supplier_empty_count = 0
 
     for c in contratos:
         orgao = orgao_display_name(c)
@@ -166,12 +251,15 @@ def main():
         if not is_municipio_sao_paulo_contract(c):
             continue
 
-        fornecedor_data = as_dict(c.get("fornecedor"))
-        fornecedor = fornecedor_data.get("razaoSocial") or c.get("fornecedorNome") or c.get("nomeFornecedor") or ""
-        cnpj = fornecedor_data.get("cpfCnpj") or c.get("fornecedorCnpj") or c.get("cpfCnpjFornecedor") or ""
-        objeto = c.get("objeto") or c.get("objetoContrato") or c.get("descricaoObjeto") or ""
-        valor_estimado = parse_money(c.get("valorEstimado"))
-        valor_contratado = parse_money(c.get("valorFinal") or c.get("valorContrato") or c.get("valorGlobal"))
+        if len(accepted_org_sample) < 20:
+            accepted_org_sample.append(contract_org_text(c)[:300])
+
+        fornecedor, cnpj = extract_supplier(c)
+        if not fornecedor and not cnpj:
+            supplier_empty_count += 1
+        objeto = extract_object(c)
+        valor_estimado = parse_money(c.get("valorEstimado") or c.get("valorEstimadoTotal"))
+        valor_contratado = first_money_from_keys(c, VALUE_KEYS)
         pub = c.get("dataPublicacao") or c.get("dataInclusao") or c.get("dataAssinatura")
         vig_fim = c.get("dataVigenciaFim") or ""
 
@@ -186,15 +274,16 @@ def main():
             "vigencia_fim": vig_fim
         })
 
-        key = cnpj or norm_text(fornecedor)
+        key = cnpj or norm_text(fornecedor) or "(fornecedor não informado)"
         f = fornecedores_agg[key]
         f["cnpj"] = cnpj
-        f["nome"] = fornecedor
+        f["nome"] = fornecedor or "(fornecedor não informado)"
         f["total_contratado"] += valor_contratado
+        f["qtd_contratos"] += 1
 
     fatos_pagamentos = []
     fornecedores = list(fornecedores_agg.values())
-    topN = sorted(fornecedores, key=lambda x: x["total_contratado"], reverse=True)[:5]
+    topN = sorted(fornecedores, key=lambda x: x["total_contratado"], reverse=True)[:10]
 
     flags = {
         "top_fornecedores_contratados": topN,
@@ -204,7 +293,10 @@ def main():
         "fetch_partial": bool(fetch_partial),
         "raw_contracts_loaded": len(contratos),
         "contracts_after_filter": len(fatos_contratos),
+        "suppliers_after_filter": len(fornecedores),
+        "supplier_empty_count": supplier_empty_count,
         "orgao_sample": orgao_sample,
+        "accepted_org_sample": accepted_org_sample,
     }
     if fetch_failed and contratos:
         flags["warning"] = "Coleta PNCP parcial: alguns blocos falharam, mas os dados obtidos foram preservados no painel."
@@ -212,6 +304,8 @@ def main():
         flags["warning"] = "Coleta PNCP falhou sem dados aproveitáveis."
     if contratos and not fatos_contratos:
         flags["warning"] = "Coleta PNCP retornou dados, mas nenhum registro passou pelo filtro do Município de São Paulo. Verifique orgao_sample."
+    if supplier_empty_count:
+        flags["supplier_warning"] = f"{supplier_empty_count} contratos filtrados ainda vieram sem fornecedor identificável no endpoint consultado."
 
     with open(data_processed_dir / "fatos_contratos.json", "w", encoding="utf-8") as f:
         json.dump(fatos_contratos, f, ensure_ascii=False)
@@ -221,7 +315,7 @@ def main():
         json.dump(fornecedores, f, ensure_ascii=False)
     with open(data_processed_dir / "flags.json", "w", encoding="utf-8") as f:
         json.dump(flags, f, ensure_ascii=False)
-    print(f"[03] Processamento concluído: raw={len(contratos)} contratos={len(fatos_contratos)} fornecedores={len(fornecedores)}")
+    print(f"[03] Processamento concluído: raw={len(contratos)} contratos={len(fatos_contratos)} fornecedores={len(fornecedores)} sem_fornecedor={supplier_empty_count}")
 
 
 if __name__ == "__main__":
