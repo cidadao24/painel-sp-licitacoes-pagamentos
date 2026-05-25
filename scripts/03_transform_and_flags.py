@@ -3,13 +3,19 @@ Transforma dados brutos do PNCP e gera arquivos JSON processados para o painel.
 
 Este script carrega os dados brutos de `data/raw/pncp/contratos.json`, filtra
 contratos do Município de São Paulo, extrai fornecedor/valor de forma tolerante
-a variações do schema do PNCP e gera JSONs consumidos pelo site.
+a variações do schema do PNCP, enriquece CNPJs com data de abertura quando
+possível e gera JSONs consumidos pelo site.
 """
 
 import json
 import os
 import pathlib
+import re
+import time
 from collections import defaultdict
+from datetime import date, datetime
+
+import requests
 
 import sys
 current_dir = pathlib.Path(__file__).resolve()
@@ -63,6 +69,10 @@ VALUE_KEYS = [
     "valorInicial", "valorParcela", "valor", "valorContratado",
 ]
 
+CNPJ_CACHE_PATH = pathlib.Path("data/raw/cnpj/cnpj_cache.json")
+CNPJ_ENRICH_LIMIT = int(os.getenv("CNPJ_ENRICH_LIMIT", "150"))
+CNPJ_API_URL = "https://brasilapi.com.br/api/cnpj/v1/{cnpj}"
+
 
 def load_json(path: str):
     if not os.path.exists(path):
@@ -80,6 +90,92 @@ def load_fetch_status() -> dict:
             return json.load(f)
     except Exception as exc:
         return {"success": False, "partial": False, "status_read_error": f"{type(exc).__name__}: {exc}"}
+
+
+def load_cnpj_cache() -> dict:
+    if not CNPJ_CACHE_PATH.exists():
+        return {}
+    try:
+        with CNPJ_CACHE_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_cnpj_cache(cache: dict) -> None:
+    CNPJ_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with CNPJ_CACHE_PATH.open("w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def only_digits(value: str) -> str:
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def parse_iso_date(value: str) -> date | None:
+    if not value:
+        return None
+    value = str(value)[:10]
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def cnpj_age_info(opening_date: str) -> dict:
+    dt = parse_iso_date(opening_date)
+    if not dt:
+        return {"cnpj_data_abertura": opening_date or "", "cnpj_idade_anos": None, "cnpj_idade_texto": "idade do CNPJ indisponível"}
+    today = date.today()
+    months = (today.year - dt.year) * 12 + (today.month - dt.month)
+    if today.day < dt.day:
+        months -= 1
+    years, rem_months = divmod(max(months, 0), 12)
+    if years and rem_months:
+        text = f"{years} ano{'s' if years != 1 else ''} e {rem_months} mês{'es' if rem_months != 1 else ''}"
+    elif years:
+        text = f"{years} ano{'s' if years != 1 else ''}"
+    else:
+        text = f"{rem_months} mês{'es' if rem_months != 1 else ''}"
+    return {"cnpj_data_abertura": dt.isoformat(), "cnpj_idade_anos": round(months / 12, 2), "cnpj_idade_texto": text}
+
+
+def lookup_cnpj_age(cnpj: str, cache: dict, remaining: dict) -> dict:
+    digits = only_digits(cnpj)
+    if len(digits) != 14:
+        return {"cnpj_data_abertura": "", "cnpj_idade_anos": None, "cnpj_idade_texto": "CNPJ não informado ou inválido"}
+
+    if digits in cache:
+        cached = cache[digits]
+        if cached.get("data_inicio_atividade"):
+            return cnpj_age_info(cached.get("data_inicio_atividade"))
+        return {"cnpj_data_abertura": "", "cnpj_idade_anos": None, "cnpj_idade_texto": cached.get("erro") or "idade do CNPJ indisponível"}
+
+    if remaining["count"] <= 0:
+        return {"cnpj_data_abertura": "", "cnpj_idade_anos": None, "cnpj_idade_texto": "idade do CNPJ pendente de cache"}
+
+    remaining["count"] -= 1
+    try:
+        resp = requests.get(CNPJ_API_URL.format(cnpj=digits), timeout=20, headers={"User-Agent": "cidadao24-painel-sp-licitacoes-pagamentos/1.0"})
+        if resp.status_code == 404:
+            cache[digits] = {"erro": "CNPJ não encontrado", "consultado_em": datetime.utcnow().isoformat(timespec="seconds") + "Z"}
+            return {"cnpj_data_abertura": "", "cnpj_idade_anos": None, "cnpj_idade_texto": "CNPJ não encontrado"}
+        resp.raise_for_status()
+        data = resp.json()
+        cache[digits] = {
+            "data_inicio_atividade": data.get("data_inicio_atividade") or data.get("data_abertura") or "",
+            "razao_social": data.get("razao_social") or "",
+            "nome_fantasia": data.get("nome_fantasia") or "",
+            "consultado_em": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        time.sleep(0.2)
+        return cnpj_age_info(cache[digits].get("data_inicio_atividade"))
+    except Exception as exc:
+        cache[digits] = {"erro": f"{type(exc).__name__}: {exc}", "consultado_em": datetime.utcnow().isoformat(timespec="seconds") + "Z"}
+        return {"cnpj_data_abertura": "", "cnpj_idade_anos": None, "cnpj_idade_texto": "idade do CNPJ indisponível"}
 
 
 def as_dict(value: Any) -> dict:
@@ -190,11 +286,9 @@ def is_municipio_sao_paulo_contract(c: dict) -> bool:
 
     has_municipal_sp_token = any(token in text for token in MUNICIPIO_SP_ORG_TOKENS)
 
-    # Estruturado: município = São Paulo/SP + órgão municipal explícito.
     if municipio == "SAO PAULO" and (not uf or uf == "SP"):
         return has_municipal_sp_token or "MUNICIPAL" in text
 
-    # Não estruturado: exige token forte; não basta conter "São Paulo".
     return has_municipal_sp_token
 
 
@@ -204,7 +298,6 @@ def extract_supplier(c: dict) -> tuple[str, str]:
     name = first_value_from_keys(c, fornecedor_obj, fornecedor_pessoa, keys=SUPPLIER_NAME_KEYS)
     cnpj = first_value_from_keys(c, fornecedor_obj, fornecedor_pessoa, keys=SUPPLIER_CNPJ_KEYS)
 
-    # Alguns retornos do PNCP usam campos paralelos com nomes diferentes.
     if not name:
         for key, value in c.items():
             lk = key.lower()
@@ -234,12 +327,15 @@ def main():
     fetch_status = load_fetch_status()
     fetch_failed = not bool(fetch_status.get("success", True))
     fetch_partial = bool(fetch_status.get("partial", False))
+    cnpj_cache = load_cnpj_cache()
+    cnpj_remaining = {"count": CNPJ_ENRICH_LIMIT}
 
     fatos_contratos: list = []
-    fornecedores_agg: Dict[str, Dict] = defaultdict(lambda: {"cnpj": "", "nome": "", "total_contratado": 0.0, "total_pago": 0.0, "qtd_contratos": 0})
+    fornecedores_agg: Dict[str, Dict] = defaultdict(lambda: {"cnpj": "", "nome": "", "total_contratado": 0.0, "total_pago": 0.0, "qtd_contratos": 0, "cnpj_data_abertura": "", "cnpj_idade_anos": None, "cnpj_idade_texto": ""})
     orgao_sample: list[str] = []
     accepted_org_sample: list[str] = []
     supplier_empty_count = 0
+    cnpj_enriched_count = 0
 
     for c in contratos:
         orgao = orgao_display_name(c)
@@ -255,6 +351,9 @@ def main():
             accepted_org_sample.append(contract_org_text(c)[:300])
 
         fornecedor, cnpj = extract_supplier(c)
+        cnpj_age = lookup_cnpj_age(cnpj, cnpj_cache, cnpj_remaining)
+        if cnpj_age.get("cnpj_data_abertura"):
+            cnpj_enriched_count += 1
         if not fornecedor and not cnpj:
             supplier_empty_count += 1
         objeto = extract_object(c)
@@ -268,18 +367,25 @@ def main():
             "orgao": orgao,
             "fornecedor_nome": fornecedor,
             "fornecedor_cnpj": cnpj,
+            "cnpj_data_abertura": cnpj_age.get("cnpj_data_abertura", ""),
+            "cnpj_idade_anos": cnpj_age.get("cnpj_idade_anos"),
+            "cnpj_idade_texto": cnpj_age.get("cnpj_idade_texto", ""),
             "objeto": objeto,
             "valor_estimado": valor_estimado,
             "valor_contratado": valor_contratado,
             "vigencia_fim": vig_fim
         })
 
-        key = cnpj or norm_text(fornecedor) or "(fornecedor não informado)"
+        key = only_digits(cnpj) or norm_text(fornecedor) or "(fornecedor não informado)"
         f = fornecedores_agg[key]
         f["cnpj"] = cnpj
         f["nome"] = fornecedor or "(fornecedor não informado)"
         f["total_contratado"] += valor_contratado
         f["qtd_contratos"] += 1
+        if cnpj_age.get("cnpj_data_abertura") and not f.get("cnpj_data_abertura"):
+            f.update(cnpj_age)
+
+    save_cnpj_cache(cnpj_cache)
 
     fatos_pagamentos = []
     fornecedores = list(fornecedores_agg.values())
@@ -295,6 +401,8 @@ def main():
         "contracts_after_filter": len(fatos_contratos),
         "suppliers_after_filter": len(fornecedores),
         "supplier_empty_count": supplier_empty_count,
+        "cnpj_enriched_count": cnpj_enriched_count,
+        "cnpj_enrich_limit": CNPJ_ENRICH_LIMIT,
         "orgao_sample": orgao_sample,
         "accepted_org_sample": accepted_org_sample,
     }
@@ -315,7 +423,7 @@ def main():
         json.dump(fornecedores, f, ensure_ascii=False)
     with open(data_processed_dir / "flags.json", "w", encoding="utf-8") as f:
         json.dump(flags, f, ensure_ascii=False)
-    print(f"[03] Processamento concluído: raw={len(contratos)} contratos={len(fatos_contratos)} fornecedores={len(fornecedores)} sem_fornecedor={supplier_empty_count}")
+    print(f"[03] Processamento concluído: raw={len(contratos)} contratos={len(fatos_contratos)} fornecedores={len(fornecedores)} sem_fornecedor={supplier_empty_count} cnpj_enriquecidos={cnpj_enriched_count}")
 
 
 if __name__ == "__main__":
