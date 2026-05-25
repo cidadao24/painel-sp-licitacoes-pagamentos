@@ -27,17 +27,25 @@ from scripts.utils import parse_money, norm_text
 from typing import Dict, Any
 
 
-MUNICIPIO_SP_ORG_TOKENS = [
+# Tokens fortes que, sozinhos, identificam o Município de São Paulo.
+# Não incluir aqui expressões genéricas como "FUNDO MUNICIPAL DE SAUDE",
+# pois elas existem em qualquer município do Brasil.
+STRONG_MUNICIPIO_SP_TOKENS = [
     "MUNICIPIO DE SAO PAULO",
     "MUNICIPIO SAO PAULO",
     "PREFEITURA DO MUNICIPIO DE SAO PAULO",
     "PREFEITURA MUNICIPAL DE SAO PAULO",
     "PREFEITURA DE SAO PAULO",
-    "SECRETARIA MUNICIPAL",
-    "FUNDO MUNICIPAL DE SAUDE",
-    "FUNDO MUNICIPAL DE ASSISTENCIA SOCIAL",
-    "FUNDO MUNICIPAL DOS DIREITOS",
     "CAMARA MUNICIPAL DE SAO PAULO",
+]
+
+# Tokens municipais genéricos; só valem quando o campo estruturado municipioNome
+# é São Paulo/SP. Sem isso, eles puxam Florianópolis, Itajaí, Laguna etc.
+GENERIC_MUNICIPAL_TOKENS = [
+    "SECRETARIA MUNICIPAL",
+    "FUNDO MUNICIPAL",
+    "CAMARA MUNICIPAL",
+    "MUNICIPAL",
 ]
 
 EXCLUDED_ORG_TOKENS = [
@@ -284,12 +292,23 @@ def is_municipio_sao_paulo_contract(c: dict) -> bool:
     if any(token in text for token in EXCLUDED_ORG_TOKENS):
         return False
 
-    has_municipal_sp_token = any(token in text for token in MUNICIPIO_SP_ORG_TOKENS)
+    has_strong_sp_token = any(token in text for token in STRONG_MUNICIPIO_SP_TOKENS)
 
-    if municipio == "SAO PAULO" and (not uf or uf == "SP"):
-        return has_municipal_sp_token or "MUNICIPAL" in text
+    # Se o PNCP trouxe município/UF estruturado, respeite esses campos.
+    # Isso impede que "FUNDO MUNICIPAL DE SAUDE DE FLORIANOPOLIS" passe só
+    # por conter a expressão genérica "FUNDO MUNICIPAL".
+    if municipio:
+        if municipio != "SAO PAULO":
+            return False
+        if uf and uf != "SP":
+            return False
+        return has_strong_sp_token or any(token in text for token in GENERIC_MUNICIPAL_TOKENS)
 
-    return has_municipal_sp_token
+    if uf and uf != "SP":
+        return False
+
+    # Sem município estruturado, só aceitamos tokens fortes que mencionem São Paulo.
+    return has_strong_sp_token
 
 
 def extract_supplier(c: dict) -> tuple[str, str]:
