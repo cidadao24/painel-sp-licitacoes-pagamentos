@@ -1,11 +1,10 @@
 """
 Coleta dados de contratos do PNCP com foco no Município de São Paulo.
 
-Antes, o coletor buscava contratos nacionais por data e filtrava depois. Isso
-produzia amostras aleatórias e, em caso de falha parcial da API, podia não trazer
-nenhum contrato de São Paulo. Agora tentamos estratégias direcionadas primeiro
-(município/UF e CNPJ-base da Prefeitura), mantendo a coleta nacional apenas como
-fallback diagnóstico.
+A coleta direcionada é usada com parcimônia: se a API começar a responder com
+timeouts/503, o script interrompe essa etapa e volta para a coleta nacional em
+blocos, deixando o filtro posterior separar São Paulo. Isso evita que uma rodada
+ruim da API apague o painel inteiro.
 """
 
 import json
@@ -21,14 +20,12 @@ BASE_URL = "https://pncp.gov.br/api/consulta"
 
 HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "cidadao24-painel-sp-licitacoes-pagamentos/1.2 (+https://github.com/cidadao24/painel-sp-licitacoes-pagamentos)",
+    "User-Agent": "cidadao24-painel-sp-licitacoes-pagamentos/1.3 (+https://github.com/cidadao24/painel-sp-licitacoes-pagamentos)",
 }
 
-# Identificadores úteis para tentar reduzir a busca na própria fonte.
 SAO_PAULO_IBGE = "3550308"
-SAO_PAULO_UF = "SP"
 PREFEITURA_SP_CNPJ_BASE = "46395000"
-PREFEITURA_SP_CNPJ = "46395000000139"
+TARGETED_FAILURE_LIMIT = 3
 
 
 class FetchDiagnostics(list):
@@ -45,12 +42,20 @@ def load_parametros() -> dict:
         return json.load(f)
 
 
-def fetch_paginated(endpoint: str, params: dict, diagnostics: FetchDiagnostics, strategy: str) -> tuple[list, bool, str]:
-    """Faz paginação em um endpoint PNCP com tentativas e backoff.
+def load_existing_contracts() -> list[dict]:
+    path = pathlib.Path("data/raw/pncp/contratos.json")
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
-    Retorna (resultados, sucesso, erro_final). Erros 400/404 em parâmetros de
-    filtro são tratados como estratégia incompatível, sem derrubar o workflow.
-    """
+
+def fetch_paginated(endpoint: str, params: dict, diagnostics: FetchDiagnostics, strategy: str, timeout: int = 30) -> tuple[list, bool, str]:
+    """Faz paginação em um endpoint PNCP com tentativas e backoff curto."""
     resultados: list = []
     pagina = 1
     url = f"{BASE_URL}{endpoint}"
@@ -61,9 +66,9 @@ def fetch_paginated(endpoint: str, params: dict, diagnostics: FetchDiagnostics, 
         page_params["tamanhoPagina"] = 100
         last_error = ""
 
-        for tentativa in range(1, 4):
+        for tentativa in range(1, 3):
             try:
-                resp = requests.get(url, params=page_params, headers=HEADERS, timeout=45)
+                resp = requests.get(url, params=page_params, headers=HEADERS, timeout=timeout)
                 if resp.status_code in (400, 404, 422):
                     msg = f"HTTP {resp.status_code}: {resp.text[:500]}"
                     diagnostics.add(level="warning", strategy=strategy, endpoint=endpoint, pagina=pagina, params=page_params, error=msg)
@@ -76,8 +81,8 @@ def fetch_paginated(endpoint: str, params: dict, diagnostics: FetchDiagnostics, 
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 diagnostics.add(level="warning", strategy=strategy, endpoint=endpoint, pagina=pagina, tentativa=tentativa, params=page_params, error=last_error)
-                if tentativa < 3:
-                    time.sleep(2 * tentativa)
+                if tentativa < 2:
+                    time.sleep(2)
         else:
             return resultados, False, last_error
 
@@ -121,19 +126,10 @@ def dedupe_contracts(contratos: list[dict]) -> list[dict]:
 
 
 def strategy_params(base: dict) -> list[tuple[str, dict]]:
-    """Estratégias em ordem de preferência.
-
-    A API PNCP pode variar/ignorar parâmetros conforme versão. Mantemos várias
-    formas comuns de filtro e registramos no diagnostics quais funcionaram.
-    """
+    # Só duas tentativas direcionadas para evitar bombardear uma API instável.
     return [
         ("municipio_ibge", {**base, "codigoMunicipioIbge": SAO_PAULO_IBGE}),
-        ("municipio_uf_nome", {**base, "uf": SAO_PAULO_UF, "municipio": "São Paulo"}),
-        ("municipio_uf_nome_ascii", {**base, "uf": SAO_PAULO_UF, "municipio": "Sao Paulo"}),
         ("cnpj_orgao_base", {**base, "cnpjOrgao": PREFEITURA_SP_CNPJ_BASE}),
-        ("cnpj_orgao_completo", {**base, "cnpjOrgao": PREFEITURA_SP_CNPJ}),
-        ("cnpj_entidade_base", {**base, "cnpjEntidade": PREFEITURA_SP_CNPJ_BASE}),
-        ("cnpj_entidade_completo", {**base, "cnpjEntidade": PREFEITURA_SP_CNPJ}),
     ]
 
 
@@ -141,9 +137,18 @@ def fetch_targeted_contracts(data_ini, data_fim, diagnostics: FetchDiagnostics) 
     contratos: list[dict] = []
     blocos = 0
     falhas = 0
+    consecutive_failures = 0
     strategy_summary: list[dict] = []
 
-    for inicio, fim in date_chunks(data_ini, data_fim, chunk_days=7):
+    # Testa primeiro os blocos mais recentes; são mais úteis ao painel.
+    chunks = list(date_chunks(data_ini, data_fim, chunk_days=7))
+    chunks.reverse()
+
+    for inicio, fim in chunks:
+        if consecutive_failures >= TARGETED_FAILURE_LIMIT:
+            diagnostics.add(level="warning", message="Circuit breaker: coleta direcionada interrompida após falhas consecutivas.", consecutive_failures=consecutive_failures)
+            break
+
         base = {
             "dataInicial": inicio.strftime("%Y%m%d"),
             "dataFinal": fim.strftime("%Y%m%d"),
@@ -153,7 +158,7 @@ def fetch_targeted_contracts(data_ini, data_fim, diagnostics: FetchDiagnostics) 
 
         for strategy, params in strategy_params(base):
             blocos += 1
-            lote, sucesso, erro = fetch_paginated("/v1/contratos", params, diagnostics, strategy)
+            lote, sucesso, erro = fetch_paginated("/v1/contratos", params, diagnostics, strategy, timeout=25)
             strategy_summary.append({
                 "strategy": strategy,
                 "dataInicial": base["dataInicial"],
@@ -165,13 +170,13 @@ def fetch_targeted_contracts(data_ini, data_fim, diagnostics: FetchDiagnostics) 
             bloco_resultados.extend(lote)
             if sucesso and lote:
                 bloco_ok = True
-                # Se uma estratégia direcionada achou dados, não precisamos repetir
-                # o mesmo bloco com outras variações de parâmetro.
+                consecutive_failures = 0
                 break
 
         contratos.extend(bloco_resultados)
         if not bloco_ok and not bloco_resultados:
             falhas += 1
+            consecutive_failures += 1
             diagnostics.add(level="warning", endpoint="/v1/contratos", dataInicial=base["dataInicial"], dataFinal=base["dataFinal"], message="Nenhuma estratégia direcionada retornou contratos para este bloco.")
 
     return contratos, blocos, falhas, strategy_summary
@@ -182,13 +187,13 @@ def fetch_national_fallback(data_ini, data_fim, diagnostics: FetchDiagnostics) -
     blocos = 0
     falhas = 0
 
-    for inicio, fim in date_chunks(data_ini, data_fim, chunk_days=3):
+    for inicio, fim in date_chunks(data_ini, data_fim, chunk_days=7):
         blocos += 1
         params = {
             "dataInicial": inicio.strftime("%Y%m%d"),
             "dataFinal": fim.strftime("%Y%m%d"),
         }
-        lote, sucesso, erro = fetch_paginated("/v1/contratos", params, diagnostics, "national_fallback")
+        lote, sucesso, erro = fetch_paginated("/v1/contratos", params, diagnostics, "national_fallback", timeout=45)
         contratos.extend(lote)
         if not sucesso:
             falhas += 1
@@ -208,21 +213,25 @@ def main():
     targeted, targeted_blocos, targeted_falhas, strategy_summary = fetch_targeted_contracts(data_ini, data_fim, diagnostics)
     targeted = dedupe_contracts(targeted)
 
-    # O fallback nacional só entra quando a coleta direcionada não encontrou nada.
-    # Ele mantém o painel diagnosticável, mas o filtro posterior continua impedindo
-    # outros municípios de aparecerem no dashboard.
     fallback: list[dict] = []
     fallback_blocos = 0
     fallback_falhas = 0
     if not targeted:
-        diagnostics.add(level="warning", message="Coleta direcionada não retornou contratos; acionando fallback nacional diagnóstico.")
+        diagnostics.add(level="warning", message="Coleta direcionada sem dados aproveitáveis; usando fallback nacional em blocos semanais.")
         fallback, fallback_blocos, fallback_falhas = fetch_national_fallback(data_ini, data_fim, diagnostics)
         fallback = dedupe_contracts(fallback)
 
     contratos = dedupe_contracts(targeted + fallback)
+    existing_contracts = load_existing_contracts()
+    preserved_previous = False
+    if not contratos and existing_contracts:
+        diagnostics.add(level="warning", message="Coleta PNCP não retornou dados novos; preservando contratos brutos anteriores para evitar apagar o painel.", existing_contracts=len(existing_contracts))
+        contratos = existing_contracts
+        preserved_previous = True
+
     falhas = targeted_falhas + fallback_falhas
     blocos = targeted_blocos + fallback_blocos
-    sucesso = bool(targeted) or bool(fallback)
+    sucesso = bool(contratos)
 
     outdir = pathlib.Path("data/raw/pncp")
     outdir.mkdir(parents=True, exist_ok=True)
@@ -240,7 +249,8 @@ def main():
                 "contracts_collected": len(contratos),
                 "targeted_contracts_collected": len(targeted),
                 "fallback_contracts_collected": len(fallback),
-                "target_strategy_summary": strategy_summary[:200],
+                "preserved_previous_contracts": preserved_previous,
+                "target_strategy_summary": strategy_summary[:80],
             },
             f,
             ensure_ascii=False,
@@ -248,7 +258,7 @@ def main():
     with (outdir / "diagnostics.json").open("w", encoding="utf-8") as f:
         json.dump(list(diagnostics), f, ensure_ascii=False, indent=2)
 
-    print(f"[02] PNCP: contratos={len(contratos)}, targeted={len(targeted)}, fallback={len(fallback)}, blocos={blocos}, falhas={falhas}, sucesso={sucesso}")
+    print(f"[02] PNCP: contratos={len(contratos)}, targeted={len(targeted)}, fallback={len(fallback)}, preserved_previous={preserved_previous}, blocos={blocos}, falhas={falhas}, sucesso={sucesso}")
 
 
 if __name__ == "__main__":
