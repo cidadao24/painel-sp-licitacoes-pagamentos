@@ -15,6 +15,10 @@ on:
   schedule:
     - cron: '28 */6 * * *'
 
+concurrency:
+  group: pages-deploy-main
+  cancel-in-progress: false
+
 permissions:
   contents: read
   pages: write
