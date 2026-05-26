@@ -12,6 +12,10 @@ on:
     - cron: '5 9 * * *'  # Todos os dias às 06:05 BRT (09:05 UTC)
   workflow_dispatch:
 
+concurrency:
+  group: data-refresh-main
+  cancel-in-progress: false
+
 permissions:
   contents: write
   actions: read
@@ -22,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -39,10 +45,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase --autostash origin main
           git add -A
           if git diff --cached --quiet; then
             echo "Nenhuma alteração a ser commitada."
           else
             git commit -m "chore(data): refresh $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            git push
+            git push origin HEAD:main
           fi
